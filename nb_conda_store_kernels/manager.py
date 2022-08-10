@@ -1,8 +1,10 @@
+import json
 import tempfile
 import os
+from typing import Dict
 
 from jupyter_client.kernelspec import KernelSpecManager, KernelSpec, NoSuchKernel
-from jupyter_client.utils import run_sync
+from .utils import run_sync
 from traitlets import Bool, Unicode
 from conda_store import api
 
@@ -49,6 +51,8 @@ class CondaStoreKernelSpecManager(KernelSpecManager):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
+        self._kernel_user = "--user"
+        self._kernel_prefix = None
         self.log.info("[nb_conda_store_kernels] enabled")
 
     @property
@@ -76,19 +80,19 @@ class CondaStoreKernelSpecManager(KernelSpecManager):
             display_name = self.name_format.format(
                 namespace=namespace, name=name, build=build
             )
-            kernel_specs[f"conda-store://{namespace}/{name}:{build}"] = KernelSpec(
+            kernel_spec_write = kernel_specs[f"conda-store://{namespace}/{name}:{build}"] = KernelSpec(
                 display_name=display_name,
                 argv=[
-                    "conda-store",
-                    "run",
-                    str(build),
-                    "--",
                     "python",
-                    "-m",
-                    "IPython",
-                    "kernel",
-                    "-f",
-                    "{connection_file}",
+                    f"/usr/local/share/jupyter/kernels/{name}/scripts/launch_kubernetes.py",
+                    "--RemoteProcessProxy.kernel-id",
+                    "{kernel_id}",
+                    "--RemoteProcessProxy.port-range",
+                    "{port_range}",
+                    "--RemoteProcessProxy.response-address",
+                    "{response_address}",
+                    "--RemoteProcessProxy.public-key",
+                    "{public_key}"
                 ],
                 language="python",
                 resource_dir=os.path.join(
@@ -96,8 +100,33 @@ class CondaStoreKernelSpecManager(KernelSpecManager):
                     "conda-store",
                     str(build),
                 ),
-                metadata={},
+                metadata={
+                    "process_proxy": {
+                        "class_name": "enterprise_gateway.services.processproxies.k8s.KubernetesProcessProxy",
+                        "config": {
+                            "image_name": "elyra/kernel-py:2.6.0" # for now, fetch this image
+                        }
+                    },
+                },
             )
+
+            # Install the kernel spec
+            try:
+                destination = self.install_kernel_spec(
+                    f'/usr/local/share/jupyter/kernels/{name}/', # how are we to use the whitelist if conda environments be generated on the fly?
+                    kernel_name=display_name,
+                    user=True,
+                    prefix=self._kernel_prefix
+                )
+                kernel_spec = os.join(destination, "kernel.json")
+                tmp_spec = kernel_spec_write.copy()
+                with open(kernel_spec, "w") as f:
+                    json.dump(tmp_spec, f)
+            except OSError as error:
+                self.log.warning(
+                    u"[nb_conda_kernels] Fail to install kernel",
+                    exc_info=error
+                )
         return kernel_specs
 
     def find_kernel_specs(self):
